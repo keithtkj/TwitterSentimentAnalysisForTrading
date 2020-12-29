@@ -1,237 +1,190 @@
-# Import libraries
-import sys
+"""Twitter-sentiment trading strategy for $AAPL.
+
+Illustrative end-to-end pipeline: collect tweets (Tweepy), filter bot accounts
+(Botometer), score sentiment (VADER), map each tweet to the trading window it
+should influence, generate daily buy/sell signals from retweet-weighted
+sentiment vs. its 21-day average, and backtest against Yahoo Finance prices.
+
+Requires your own Twitter API credentials and a RapidAPI key for Botometer;
+fill in the placeholders below before running.
+"""
+
+from datetime import datetime, timedelta
+
 import tweepy
 import Botometer
-import pandas as pd
 import numpy as np
+import pandas as pd
+import pandas_datareader as web
 import matplotlib.pyplot as plt
+from pandas.tseries.offsets import BDay
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-sys.path.append('...') # replace '...' with your unique path
 
-# Create a Twitter developer account to get a unique Twitter token
-# Store this information in a dictionary:
+
+# --- Twitter API credentials (fill these in) ---
 twitter_token = {
-        'consumer_key': "Copy your consumer key here",
-        'consumer_secret': "Copy your consumer secret here here",
-        'access_token': "Copy your access token here",
-        'access_token_secret': "Copy your access token secret here",
-    }
+    'consumer_key': "Copy your consumer key here",
+    'consumer_secret': "Copy your consumer secret here",
+    'access_token': "Copy your access token here",
+    'access_token_secret': "Copy your access token secret here",
+}
 consumer_key = twitter_token['consumer_key']
 consumer_secret = twitter_token['consumer_secret']
 
-# Create authentication object
+# Authenticate and create the Twitter API client.
 authen = tweepy.AppAuthHandler(consumer_key, consumer_secret)
-# Create Twitter API object
 twitter_api = tweepy.API(authen, wait_on_rate_limit=True)
 
-# Fetch all tweets using Tweepy's Cursor method within a timeframe
-# 180 days (3 months) is used in this example
-from datetime import datetime, timedelta
-start = (datetime.now()+timedelta(180)).strftime("%Y-%m-%d")
+# Fetch tweets over a time window (180 days in this example).
+start = (datetime.now() + timedelta(180)).strftime("%Y-%m-%d")
 end = (datetime.now()).strftime("%Y-%m-%d")
-cursor_results = tweepy.Cursor(twitter_api.search, q='$AAPL', since=start, until=end, count = 100)
-
-# Extract information from tweets - to store them in a dataframe later
+cursor_results = tweepy.Cursor(twitter_api.search, q='$AAPL', since=start, until=end, count=100)
 tweets_info = cursor_results.items()
 
-# Store tweets' information in a dataframe
-tweets_df = pd.DataFrame
+# Collect tweet fields into a dataframe.
+tweets_df = pd.DataFrame()
 for tweet in tweets_info:
     tweets_df = tweets_df.append(
-                                    {
-                                        'Tweet ID': tweet.id_str,
-                                        'Created At': tweet.created_at,
-                                        'User Screen Name': tweet.user.screen_name,
-                                        'Tweet Text': tweet.text,
-                                        'Retweet Count': tweet.retweet_count,
-                                        'Favourite Count': tweet.favorite_count,
-                                        'Language': tweet.lang,
-                                    },
-                                    ignore_index=True
+        {
+            'Tweet ID': tweet.id_str,
+            'Created At': tweet.created_at,
+            'User Screen Name': tweet.user.screen_name,
+            'Tweet Text': tweet.text,
+            'Retweet Count': tweet.retweet_count,
+            'Favourite Count': tweet.favorite_count,
+            'Language': tweet.lang,
+        },
+        ignore_index=True
     )
 
-# Establish tweet ID as the index of the dataframe
+# Use the tweet ID as the index, then round-trip through Excel.
 tweets_df.index = tweets_df['Tweet ID']
-
-# Export dataframe into an excel file
-# Replace '...' with your unique path
 tweets_df.to_excel(r'...\Tweets with AAPL.xlsx', header=True)
-
-# Read the excel file
 tweet_ids = pd.read_excel(r'...\Tweets with AAPL.xlsx')
-
-
 
 
 ################################# Remove bot accounts #########################################
 
-# Returns list of tweet objects
 def get_tweet_objects_from_id(tweet_id_list):
+    """Look up full tweet objects in batches of 100 (API limit)."""
     tweet_list = []
     for i in range(0, len(tweet_id_list), 100):
-        tweet_list = tweet_list + (twitter_api.statuses_lookup(tweet_id_list[i:(100 + i)], tweet_mode='extended'))
-
+        tweet_list = tweet_list + twitter_api.statuses_lookup(tweet_id_list[i:(100 + i)], tweet_mode='extended')
     return tweet_list
 
-# Returns a dictionary of the required tweet information
+
 def get_tweet_details_by_id(tweet_id_list):
+    """Return a dataframe of the tweet fields needed downstream."""
     tweet_list = get_tweet_objects_from_id(tweet_id_list)
     tweets = pd.DataFrame()
     tweets['tweet_object'] = tweet_list
-    tweets['tweet_text'] = tweets['tweet_object'].apply(tweet_list.full_text)
-    tweets['tweet_username'] = tweets['tweet_object'].apply(tweet_list.user.screen_name)
-    tweets['tweet_id'] = tweets['tweet_object'].apply(tweet_list.id_str)
-    tweets['retweet_count'] = tweets['tweet_object'].apply(tweet_list.retweet_count)
-    tweets['created_date'] = tweets['tweet_object'].apply(tweet_list.created_at)
-
+    tweets['tweet_text'] = tweets['tweet_object'].apply(lambda t: t.full_text)
+    tweets['tweet_username'] = tweets['tweet_object'].apply(lambda t: t.user.screen_name)
+    tweets['tweet_id'] = tweets['tweet_object'].apply(lambda t: t.id_str)
+    tweets['retweet_count'] = tweets['tweet_object'].apply(lambda t: t.retweet_count)
+    tweets['created_date'] = tweets['tweet_object'].apply(lambda t: t.created_at)
     return tweets[["tweet_id", "created_date", "tweet_username", "tweet_text", "retweet_count"]]
 
-# Get tweet details from tweet id
+
 tweets = get_tweet_details_by_id(list(tweet_ids.tweet_id))
 
-# Identify unique user accounts from the tweet details & store them into dataframe
+# Score each unique account with Botometer and drop likely bots.
 unique_user_accounts = tweets['tweet_username'].unique()
 users = pd.DataFrame()
 users["tweet_username"] = unique_user_accounts
 
-rapid_api_key = '........' # replace with your unique rapid API key
+rapid_api_key = '........'  # replace with your unique RapidAPI key
 botometer = Botometer(mashape_key=rapid_api_key, **twitter_token, wait_on_ratelimit=True)
 
-# Calculate scores of all unique users using Botometer
 users['bot_score'] = users['tweet_username'].apply(lambda name: botometer.check_account(name)["raw_scores"]["english"]["overall"])
 users['cap_score'] = users['tweet_username'].apply(lambda name: botometer.check_account(name)["cap"]["english"])
+users['is_bot'] = np.where(users['bot_score'] > users['cap_score'], True, False)
 
-# Identity bots and indicate them on dataframe - if bot score > threshold value then it is a bot
-users['is_bot'] = np.where(users['bot_score']>users['cap_score'],True,False)
-
-# Merge the 2 dataframes: tweets and users, and delete tweets from bots
 tweets = pd.merge(users, tweets)
-tweets = tweets.loc[~(tweets.is_bot),:]
-
-
+tweets = tweets.loc[~(tweets.is_bot), :]
 
 
 ############################# Build The Strategy ########################################
-from pandas.tseries.offsets import BDay
 
-# Function that calculates market open time for tweets:
-def get_market_open(date): # takes the datetime at which the tweet was made
-    # Calculate market open time, if tweet was made on a weekend then subtract  BDay(0) to fetch the next business day's market open time
+def get_market_open(date):
+    """Map a tweet's timestamp to the market-open time whose session it should inform.
+
+    A tweet posted between the previous close and the next open feeds that
+    upcoming session; a tweet posted during trading hours is ignored (returns
+    None) because its information is already reflected in the live price.
+    """
     curr_date_open = pd.to_datetime(date).floor('d').replace(hour=9, minute=30) - BDay(0)
-    # Calculate market closing time, if tweet was made on a weekend then subtract  BDay(0) to fetch the next business day's market close time
     curr_date_close = pd.to_datetime(date).floor('d').replace(hour=16, minute=0) - BDay(0)
-    # Calculate previous business day's market close time
     prev_date_close = (curr_date_open - BDay()).replace(hour=16, minute=0)
-    # Calculate next business day's market open time for the tweet
     next_date_open = (curr_date_open + BDay()).replace(hour=9, minute=30)
-    # If the tweet was made after the close of the previous business day but
-    # on the next day before the market opens then the function assigns the curr_date_open as the opening time
-    # when this tweet should be used to trade
+
     if (pd.to_datetime(date) >= prev_date_close) and (pd.to_datetime(date) < curr_date_open):
         return curr_date_open
-    # If the tweet was made after the close of the current business day but
-    # on the same day then the function assigns the next_date_open as the opening time
-    # when this tweet should be used to trade
     elif (pd.to_datetime(date) >= curr_date_close) and (pd.to_datetime(date) < next_date_open):
         return next_date_open
-    # If the tweet was made during the market trading hours then function returns nothing
     else:
         return None
 
-# Apply the above function to get the market opening times when a tweet's sentiment should be used for each tweet
+
+# Assign each tweet to a trading window and drop tweets made during market hours.
 tweets["market_open_time"] = tweets["created_date"].apply(get_market_open)
+tweets = tweets.loc[~(tweets["market_open_time"].isna()), :]
 
-# Remove tweets made during market hours
-tweets = tweets.loc[~(tweets["market_open_time"].isna()),:]
-
-# Create an object of SentimentIntensityAnalyzer class
+# Score sentiment with VADER and keep tweets with a non-neutral score.
 analyzer = SentimentIntensityAnalyzer()
-
-# Calculate sentiment (compound) scores of tweets and update the dataframe with the scores
 tweets["compound_score"] = tweets["tweet_text"].apply(lambda t: analyzer.polarity_scores(t)['compound'])
+daily_sentiments = tweets.loc[(tweets["compound_score"] != 0), :]
 
-# Count tweets with non-zero sentiment scores
-daily_sentiments = tweets.loc[(tweets["compound_score"]!=0),:]
-
-# Count all the unique tweets for a given day before the market opens
+# Per-window tweet and retweet counts.
 tweet_daily_count = daily_sentiments.groupby("market_open_time").market_open_time.agg('count').to_frame('total_unique_tweets')
-
-# Count the total number of retweets for a given day before the market opens
 retweet_daily_count = daily_sentiments.groupby("market_open_time").retweet_count.agg('sum').to_frame('total_retweets')
 
-# Join the retweet count and the unique tweet count to the daily_sentiments dataframe
-daily_sentiments.set_index("market_open_time", inplace = True)
+daily_sentiments.set_index("market_open_time", inplace=True)
 daily_sentiments = daily_sentiments.join(tweet_daily_count, how='outer')
 daily_sentiments = daily_sentiments.join(retweet_daily_count, how='outer')
 
 
+#################### Export AAPL's Stock Data From Yahoo Finance ####################
 
-
-#################### Export AAPL's Stock Data From Yahoo Finance Into Excel File ####################
-import panda_datareader as web
-
-# Start and end dates to fetch date - dates were established previously
 start_date = start
 end_date = end
 
-# Fetch price data for AAPL stock within timeframe and exports into excel file in same folder as this script
+# Fetch AAPL prices over the window and round-trip through Excel.
 df = web.DataReader("AAPL", 'yahoo', start_date, end_date)
 df.to_excel("AAPL_prices.xlsx")
 
 
 ################## Organize Stock Price Data ##########################
 
-# Fetch AAPL data from excel file
 prices = pd.read_excel(r'...\AAPL_prices.xlsx')
-
-# Set date as index
 prices["Date"] = pd.to_datetime(prices["Date"]).dt.floor("d")
-prices.set_index("Date", inplace = True)
+prices.set_index("Date", inplace=True)
 
-# Calculate the percentage returns of the stock using the Open and Close prices
-# As the strategy would buy at the opening of the market and sell at the market closing time
-prices['return'] = (prices["Close"] - prices["Open"])/prices["Open"]
+# Open-to-close return, since the strategy buys at open and sells at close.
+prices['return'] = (prices["Close"] - prices["Open"]) / prices["Open"]
 
-# Join the Daily Sentiment dataframe with this Prices dataframe
-# Ensure that daily_sentiments has the same index and same date time format
+# Align the sentiment series with the price series on the trading date.
 daily_sentiments["date"] = pd.to_datetime(daily_sentiments["date"], format="%d-%m-%Y").dt.floor("d")
 daily_sentiments.set_index("date", inplace=True)
 prices = prices.join(daily_sentiments, how='outer')
-
-# Drop the null values if any
 prices.dropna(inplace=True)
 
 
 ########################### Generate Buy/Sell Signals #####################################
 
-# Trading Strategy: Buy the stock whenever the sentiment before the market opening
-# is more than the past 21-day average sentiment. Sell the stock when the sentiment
-# before the market opening is less than the past 21-day average
-
-# Create signal column that holds the buy/sell signals
+# Buy when today's sentiment beats its trailing 21-day average, sell when below.
 prices['signal'] = 0
-
-# Generate a buy signal when retweet_weighted_sentiment > its past 21 days mean
-prices.loc[(prices['retweet_weighted_sentiment'] > prices['retweet_weighted_sentiment'].rolling(21).mean().shift(1)),'signal'] = 1
-# Generate a sell signal when retweet_weighted_sentiment < its past 21 days mean
-prices.loc[(prices['retweet_weighted_sentiment'] < prices['retweet_weighted_sentiment'].rolling(21).mean().shift(1)),'signal'] = -1
-
+prices.loc[(prices['retweet_weighted_sentiment'] > prices['retweet_weighted_sentiment'].rolling(21).mean().shift(1)), 'signal'] = 1
+prices.loc[(prices['retweet_weighted_sentiment'] < prices['retweet_weighted_sentiment'].rolling(21).mean().shift(1)), 'signal'] = -1
 
 
 ############################# Backtest The Strategy and Analyze Returns ######################
 
-# Calculate strategy's returns
-prices['strategy_return'] = prices['signal']*prices['return']
+prices['strategy_return'] = prices['signal'] * prices['return']
 
-plt.figure(figsize=(15,7))
-
-# Plot the strategy returns
-plt.plot(((prices.strategy_return)+1).cumprod()*100)
-
-# Plot the market returns for comparison
-plt.plot(((prices['return'])+1).cumprod()*100)
-
-# Label the graph
-plt.legend(['Strategy Return','Market Return'],loc='upper left')
+plt.figure(figsize=(15, 7))
+plt.plot(((prices.strategy_return) + 1).cumprod() * 100)   # strategy
+plt.plot(((prices['return']) + 1).cumprod() * 100)         # market benchmark
+plt.legend(['Strategy Return', 'Market Return'], loc='upper left')
 plt.xlabel('Date')
 plt.ylabel('Percentage Return')
