@@ -1,25 +1,54 @@
-# TwitterSentimentAnalysisForTrading
+# Twitter Sentiment Analysis for Trading
 
+An **NLP-driven algorithmic trading strategy** that mines Twitter sentiment about
+a stock, converts it into daily buy/sell signals, and backtests the resulting
+strategy against the market. Built in **Python** and demonstrated on Apple
+(`$AAPL`).
 
-Natural Language Processing (NLP) is used to analyze the sentiment of tweets to predict movements in the financial markets. A trading strategy can be built around the sentiments of a stock and backtested with historical data to analyze its performance. With certain Python libraries, tweets about a particular stock are assigned a positive or negative score which suggests an increase or decrease in price. For example, Elon Musk tweeted about Tesla falling behind its production schedule in 2018 and the Tesla stock traded 6% lower the following day.
+The premise: news and opinion move markets before prices fully adjust. By
+measuring the sentiment of tweets posted *between* one day's market close and the
+next day's open, the strategy takes an intraday position in the direction the
+crowd is leaning — then exits before the close.
 
+## Pipeline
 
-After creating a Twitter developer account, a unique consumer API key and access token is given. Twitter authenticates requests through unique consumer keys when data is requested. The Tweepy Python library is used to access data from the Twitter API.
+1. **Data collection** — pull tweets mentioning `$AAPL` via the Twitter API
+   (**Tweepy**).
+2. **Bot filtering** — score each account with **Botometer** and drop tweets
+   from likely bots, which distort sentiment by pushing promotional or
+   misleading content.
+3. **Sentiment scoring** — score each tweet with **VADER**, a lexicon-based
+   sentiment analyzer tuned for social-media text, producing a normalized
+   compound score.
+4. **Signal construction** — map each tweet to the correct trading window
+   (respecting weekends and market hours), aggregate a retweet-weighted daily
+   sentiment, and generate a **buy** signal when sentiment exceeds its trailing
+   21-day average and a **sell** signal when it falls below.
+5. **Backtest & evaluation** — join sentiment with historical `$AAPL` prices
+   from Yahoo Finance, compute strategy returns from open-to-close moves, and
+   plot cumulative **strategy return vs. market return** with Matplotlib.
 
+## Stack
 
-In this example, the Apple stock, ‘$AAPL’, is used. To analyze the sentiments of Apple’s stock, we need to retrieve all the tweets that mention ‘$AAPL’ within a given time period.
+`tweepy` · `vaderSentiment` · `Botometer` · `pandas` · `numpy` ·
+`pandas-datareader` (Yahoo Finance) · `matplotlib`
 
+## Running it
 
-The strategy includes removing bot-user accounts and their tweets from the data retrieved. Bots are created for purposes such as promoting products or spreading inaccurate news about a stock, causing irregularities in the strategy. The Botometer library uses a machine learning algorithm to compute a bot score and filters out tweets from bot accounts. To access the Botometer library, a unique API key is required which can obtained from https://rapidapi.com/OSoMe/api/botometer-pro.
+```bash
+pip install tweepy vaderSentiment botometer pandas numpy pandas-datareader matplotlib
+python main.py
+```
 
+You'll need your own **Twitter API** credentials (consumer key/secret + access
+token) and a **RapidAPI** key for Botometer; add them where indicated in
+`main.py`.
 
-A sentiment score of every tweet fetched is calculated with the Valence Aware Dictionary and sEntiment Reasoner (VADER) Python library. The words in a tweet are categorized into either ‘positive’, ‘negative’, or ‘neutral’. Depending on its intensity, a word is assigned a score. The compound score of a tweet is calculated by summing the scores of all words and normalizing the result to between 0 and +1.
+## What it demonstrates
 
+Combining natural-language processing with quantitative finance — API data
+collection, bot detection, lexicon-based sentiment analysis, market-hours
+signal timing, and backtesting a strategy against a benchmark.
 
-The trading strategy involves taking a position (buy/sell) when the market opens and the trade is exited before the market closes on the same day. This position is determined by the sentiment of tweets fetched between the previous day’s market closing time and that day’s opening time as new information has not been factored into the stock price. For example, if the previous day’s closing time is 4pm and the next day’s opening time is 9am, and the sentiment of tweets surrounding AAPL stock between this time period is positive, the stock price is expected to increase and the strategy will long the stock.
-
-
-The strategy is backtested with historical price data of AAPL’s stock exported into an excel sheet from Yahoo Finance, with the use of the panda_datareader library. 
-
-
-Lastly, the performance of the strategy is analyzed by plotting its returns against market returns using the Matplotlib library.
+> Personal project exploring the link between social-media sentiment and
+> short-term price movement. Educational only — not financial advice.
